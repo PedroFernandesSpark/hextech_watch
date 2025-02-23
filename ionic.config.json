@@ -1,0 +1,7 @@
+{
+  "name": "bluetoothApp",
+  "integrations": {
+    "capacitor": {}
+  },
+  "type": "vue-vite"
+}
