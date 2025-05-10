@@ -2,7 +2,7 @@
   <ion-page>
     <ion-header>
       <ion-toolbar>
-        <ion-title>HEXTECH 0.0.e</ion-title>
+        <ion-title>HEXTECH 0.3.1</ion-title>
       </ion-toolbar>
     </ion-header>
 
