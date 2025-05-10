@@ -2,7 +2,7 @@
   <ion-page>
     <ion-header>
       <ion-toolbar>
-        <ion-title>Bluetooth App</ion-title>
+        <ion-title>HEXTECH 0.0.2</ion-title>
       </ion-toolbar>
     </ion-header>
 
@@ -10,45 +10,137 @@
       <ion-button @click="scanDevices">Search Devices</ion-button>
 
       <ion-list>
-        <ion-item v-for="device in devices" :key="device.uuids" v-if="device[0]">
+        <ion-item v-for="device in devices" :key="device.uuids">
           {{ device.name || 'Unnamed' }} - {{ device.uuids }}
         </ion-item>
       </ion-list>
 
       <ion-card v-if="dataFromDevice">
-        <ion-card-header>
-          Connected to: HEXTECH WATCH
-        </ion-card-header>
-        <ion-card-content>
-          Data from device: {{ dataFromDevice }}
-        </ion-card-content>
+        <ion-card-header>Connected to: HEXTECH WATCH</ion-card-header>
       </ion-card>
 
-      <div v-if="chartData.datasets[0].data.length">
-        <LineChart :chart-data="chartData" :chart-options="chartOptions" />
+      <ion-card v-if="readsPerSec">
+        <ion-card-header>Reads per Second: {{ readsPerSec }} Hz</ion-card-header>
+      </ion-card>
+
+      <ion-button @click="renderChartAndSaveData">Renderizar Gráfico</ion-button>
+      <ion-button @click="renderFilteredChart" color="secondary">Gráfico Filtrado</ion-button>
+      <ion-button @click="renderNormalizedChart" color="tertiary">Gráfico Normalizado</ion-button>
+      <ion-button @click="renderFilteredChartAdvanced" color="danger">Filtro Avançado</ion-button>
+
+      <div class="chart-container" v-if="chartData.datasets[0].data.length && render">
+        <div class="chart-wrapper">
+          <LineChart :chartData="chartData" :options="chartOptions" />
+        </div>
       </div>
     </ion-content>
   </ion-page>
 </template>
 
 <script>
-import { IonPage, IonHeader, IonToolbar, IonTitle, IonContent, IonButton, IonList, IonItem, IonCard, IonCardHeader, IonCardContent } from '@ionic/vue';
+import {
+  IonPage,
+  IonHeader,
+  IonToolbar,
+  IonTitle,
+  IonContent,
+  IonButton,
+  IonList,
+  IonItem,
+  IonCard,
+  IonCardHeader
+} from '@ionic/vue';
 import { BleClient } from '@capacitor-community/bluetooth-le';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
-import { Line } from 'vue-chartjs';
-import { Chart as ChartJS, Title, Tooltip, Legend, LineElement, PointElement, LinearScale, CategoryScale } from 'chart.js';
+import LineChart from './LineChart.vue';
+import { reactive } from 'vue';
 
-ChartJS.register(Title, Tooltip, Legend, LineElement, PointElement, LinearScale, CategoryScale);
+// Butterworth helpers
+function butterBandPass(lowCut, highCut, fs, order) {
+  const nyquist = 0.5 * fs;
+  const low = lowCut / nyquist;
+  const high = highCut / nyquist;
+  // Simplificado: valores fixos (não depende de lib externa como scipy)
+  return [[low, high, order], null]; // mock de coeficientes
+}
+
+function filtfilt(params, _, signal) {
+  const [low, high, order] = params;
+  // Mock: faz um filtro simples (você pode depois implementar um Butterworth real aqui)
+  const cutoffLow = low;
+  const cutoffHigh = high;
+  const filtered = signal.map((val, idx, arr) => {
+    const prev = arr[idx - 1] ?? val;
+    const next = arr[idx + 1] ?? val;
+    return (prev + val + next) / 3;
+  });
+  return filtered;
+}
+
+// PreprocessFiltering class
+class PreprocessFiltering {
+  constructor() {
+    this.lowCut = 0.8;
+    this.highCut = 4.5;
+    this.samplingFreq = 25;
+    this.filterOrder = 2;
+    this.mu = 0.0002;
+    this.M = 10;
+  }
+
+  filter(signal) {
+    const buttered = filtfilt(...butterBandPass(this.lowCut, this.highCut, this.samplingFreq, this.filterOrder), signal);
+
+    const e = [];
+    let w = Array(this.M).fill(0);
+    const xx = Array(this.M).fill(0);
+
+    for (let n = 0; n < buttered.length; n++) {
+      xx.shift();
+      xx.push(0); // sem ruído de referência
+
+      let v = 0;
+      for (let i = 0; i < this.M; i++) {
+        v += w[i] * xx[i];
+      }
+      const error = buttered[n] - v;
+      e.push(error);
+
+      for (let i = 0; i < this.M; i++) {
+        w[i] += this.mu * error * xx[i];
+      }
+    }
+
+    return e;
+  }
+}
 
 export default {
   components: {
-    IonPage, IonHeader, IonToolbar, IonTitle, IonContent, IonButton, IonList, IonItem, IonCard, IonCardHeader, IonCardContent, LineChart: Line
+    IonPage,
+    IonHeader,
+    IonToolbar,
+    IonTitle,
+    IonContent,
+    IonButton,
+    IonList,
+    IonItem,
+    IonCard,
+    IonCardHeader,
+    LineChart
   },
   data() {
     return {
+      readsPerSec: 0,
+      render: false,
+      array: [],
       devices: [],
       dataFromDevice: '',
-      chartData: {
+      isReadingData: false,
+      deviceId: null,
+      serviceUUID: "4fafc201-1fb5-459e-8fcc-c5c9c331914b",
+      characteristicUUID: "e5a1d466-344c-4be3-ab3f-189f80dd7518",
+      chartData: reactive({
         labels: [],
         datasets: [{
           label: 'Bluetooth Data',
@@ -56,11 +148,9 @@ export default {
           borderColor: 'rgb(75, 192, 192)',
           tension: 0.1
         }]
-      },
-      chartOptions: {
-        responsive: true,
-        maintainAspectRatio: false
-      }
+      }),
+      chartOptions: { responsive: true, maintainAspectRatio: false },
+      filterProcessor: new PreprocessFiltering()
     };
   },
   async created() {
@@ -70,58 +160,151 @@ export default {
   methods: {
     async scanDevices() {
       try {
-        await BleClient.requestLEScan({ name: 'HEXTECH_WATCH' }, async (e) => {
-          if (e) this.devices.push(e);
+        this.devices = [];
+        const device = await BleClient.requestDevice({
+          name: 'HEXTECH_WATCH',
+          services: [this.serviceUUID]
         });
-        
-        await BleClient.connect("F0:24:F9:57:5C:8E");
-        let i = 0;
-        while (i <= 700) {
-          const data = await BleClient.read(
-            "F0:24:F9:57:5C:8E",
-            "4fafc201-1fb5-459e-8fcc-c5c9c331914b",
-            "e5a1d466-344c-4be3-ab3f-189f80dd7518"
-          );
-          
-          this.dataFromDevice = new TextDecoder().decode(data);
-          this.updateChartData(parseFloat(this.dataFromDevice));
-          await this.saveDataToFile(this.dataFromDevice);
-          i++;
-        }
+        if (!device) return;
+        this.deviceId = device.deviceId;
+        await BleClient.connect(this.deviceId);
+        this.dataFromDevice = this.deviceId;
+        console.log(`Conectado a ${this.deviceId}`);
+        this.startReading();
       } catch (error) {
-        console.error('Error during scan:', error);
+        console.error('Erro ao escanear dispositivos:', error);
       }
+    },
+    startReading() {
+      if (!this.deviceId) return;
+      this.isReadingData = true;
+
+      setInterval(async () => {
+        try {
+          const data = await BleClient.read(
+            this.deviceId,
+            this.serviceUUID,
+            this.characteristicUUID
+          );
+
+          const decoded = new TextDecoder().decode(data);
+          const values = decoded.split(',').map(val => Number(val.trim()));
+          const timestamp = Date.now();
+
+          for (let value of values) {
+            if (!isNaN(value)) {
+              this.array.push({ value, timestamp });
+            }
+          }
+        } catch (error) {
+          console.error('Erro ao ler dados:', error);
+          this.isReadingData = false;
+        }
+      }, 10);
+    },
+    renderChartAndSaveData() {
+      this.readsPerSec = 0;
+      if (this.array.length > 1) {
+        const totalTime = this.array[this.array.length - 1].timestamp - this.array[0].timestamp;
+        if (totalTime > 0) {
+          this.readsPerSec = (this.array.length * 1000) / totalTime;
+        }
+      }
+
+      const now = Date.now();
+      const oneSecondAgo = now - 1000;
+      const filteredData = this.array.filter(item => item.timestamp >= oneSecondAgo);
+
+      this.chartData.labels = filteredData.map(item => {
+        const date = new Date(item.timestamp);
+        return `${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+      });
+
+      this.chartData.datasets[0].label = 'Bluetooth Data';
+      this.chartData.datasets[0].data = filteredData.map(item => item.value);
+      this.render = true;
+      this.saveDataToFile(filteredData);
+    },
+    renderFilteredChart() {
+      const now = Date.now();
+      const oneSecondAgo = now - 1000;
+      const filteredData = this.array.filter(item => item.timestamp >= oneSecondAgo);
+
+      if (!filteredData.length) return;
+
+      const values = filteredData.map(item => item.value);
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const normalized = values.map(v => (v - min) / (max - min || 1));
+
+      const smoothed = normalized.map((val, i, arr) => {
+        const prev = arr[i - 1] ?? val;
+        const next = arr[i + 1] ?? val;
+        return (prev + val + next) / 3;
+      });
+
+      this.chartData.labels = filteredData.map(item => {
+        const date = new Date(item.timestamp);
+        return `${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+      });
+
+      this.chartData.datasets[0].label = 'Dados Normalizados Filtrados';
+      this.chartData.datasets[0].data = smoothed;
+      this.render = true;
+    },
+    renderNormalizedChart() {
+      const now = Date.now();
+      const oneSecondAgo = now - 1000;
+      const filteredData = this.array.filter(item => item.timestamp >= oneSecondAgo);
+
+      if (!filteredData.length) return;
+
+      const values = filteredData.map(item => item.value);
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const normalized = values.map(v => (v - min) / (max - min || 1));
+
+      this.chartData.labels = filteredData.map(item => {
+        const date = new Date(item.timestamp);
+        return `${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+      });
+
+      this.chartData.datasets[0].label = 'Dados Normalizados';
+      this.chartData.datasets[0].data = normalized;
+      this.render = true;
+    },
+    renderFilteredChartAdvanced() {
+      const now = Date.now();
+      const oneSecondAgo = now - 1000;
+      const filteredData = this.array.filter(item => item.timestamp >= oneSecondAgo);
+
+      if (!filteredData.length) return;
+
+      const values = filteredData.map(item => item.value);
+      const filteredValues = this.filterProcessor.filter(values);
+
+      this.chartData.labels = filteredData.map(item => {
+        const date = new Date(item.timestamp);
+        return `${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+      });
+
+      this.chartData.datasets[0].label = 'Filtro Avançado (Butterworth + LMS)';
+      this.chartData.datasets[0].data = filteredValues;
+      this.render = true;
     },
     async saveDataToFile(data) {
       try {
-        await Filesystem.appendFile({
+        const result = await Filesystem.writeFile({
           path: 'bluetooth_data.txt',
-          data: data + '\n',
+          data: JSON.stringify(data),
           directory: Directory.Documents,
           encoding: Encoding.UTF8
         });
-        console.log('Data saved:', data);
+        console.log('Data saved:', result.uri);
       } catch (error) {
         console.error('Error saving file:', error);
-      }
-    },
-    updateChartData(value) {
-      if (!isNaN(value)) {
-        this.chartData.labels.push(new Date().toLocaleTimeString());
-        this.chartData.datasets[0].data.push(value);
-        if (this.chartData.labels.length > 20) {
-          this.chartData.labels.shift();
-          this.chartData.datasets[0].data.shift();
-        }
       }
     }
   }
 };
 </script>
-
-<style scoped>
-div {
-  height: 300px;
-  width: 100%;
-}
-</style>
