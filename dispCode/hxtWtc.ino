@@ -19,7 +19,8 @@ int buttonPin = 0;
 bool deviceConnected = false;
 
 unsigned long previousMillis = 0;
-const long interval = 100; // envia buffer a cada 100ms
+const long interval = 100;
+
 #define IR_THRESHOLD 20000
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define HEART_RATE_UUID "e5a1d466-344c-4be3-ab3f-189f80dd7518"
@@ -27,15 +28,19 @@ const long interval = 100; // envia buffer a cada 100ms
 BLEServer* pServer = nullptr;
 BLECharacteristic* pHeartRateCharacteristic = nullptr;
 
-const int bufferSize = 5;
-long hrBuffer[bufferSize];
+int bufferSize = 5;
+long* hrBuffer = nullptr;
 int bufferIndex = 0;
 bool bufferFilled = false;
+bool frequenciaRecebida = false;
 
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) { deviceConnected = true; }
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
+        frequenciaRecebida = false;
+        if (hrBuffer) delete[] hrBuffer;
+        hrBuffer = nullptr;
         pServer->startAdvertising();
     }
 };
@@ -49,7 +54,7 @@ void setup() {
     BLEService* pService = pServer->createService(SERVICE_UUID);
     pHeartRateCharacteristic = pService->createCharacteristic(
                                   HEART_RATE_UUID,
-                                  BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+                                  BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_WRITE);
     pHeartRateCharacteristic->addDescriptor(new BLE2902());
     pService->start();
 
@@ -75,9 +80,39 @@ void setup() {
 void loop() {
     if (!deviceConnected) {
         deviceConnected = pServer->getConnectedCount() > 0;
-        displayMessage("Aguardando conexão BLE...");
-        Serial.println("Aguardando conexão BLE...");
-        delay(500);
+        if (!deviceConnected) {
+            displayMessage("Aguardando conexão BLE...");
+            Serial.println("Aguardando conexão BLE...");
+            delay(500);
+        }
+        return;
+    }
+
+    if (!frequenciaRecebida) {
+      displayMessage("CONECTADO");
+      Serial.println("CONECTADO");
+      delay(500);
+        String rxData = pHeartRateCharacteristic->getValue();
+        if (rxData.length() > 0) {
+            int freq = atoi(rxData.c_str());
+            if (freq > 0) {
+                bufferSize = max(1, freq / 10);
+                if (hrBuffer) delete[] hrBuffer;
+                hrBuffer = new long[bufferSize];
+                bufferIndex = 0;
+                bufferFilled = false;
+                frequenciaRecebida = true;
+                Serial.print("Frequência recebida via BLE: ");
+                Serial.println(freq);
+                Serial.print("Buffer ajustado para: ");
+                Serial.println(bufferSize);
+                displayMessage("Freq recebida!");
+                delay(500);
+                displayMessage("Enviando Dados");
+                Serial.println("Enviando Dados");
+            }
+        }
+        delay(100);
         return;
     }
 
@@ -85,25 +120,21 @@ void loop() {
     if (currentMillis - previousMillis >= interval) {
         previousMillis = currentMillis;
 
-        // Captura nova leitura IR e armazena no buffer
         long irValue = particleSensor.getIR();
         hrBuffer[bufferIndex] = irValue;
         bufferIndex = (bufferIndex + 1) % bufferSize;
         if (bufferIndex == 0) bufferFilled = true;
 
-        // Se o buffer já estiver preenchido com 6 valores, envia via BLE
         if (bufferFilled) {
-            char data[100] = "";
+            char data[150] = "";
             for (int i = 0; i < bufferSize; i++) {
-                char temp[10];
+                char temp[12];
                 itoa(hrBuffer[(bufferIndex + i) % bufferSize], temp, 10);
                 strcat(data, temp);
                 if (i < bufferSize - 1) strcat(data, ",");
             }
-
             pHeartRateCharacteristic->setValue((uint8_t*)data, strlen(data));
             pHeartRateCharacteristic->notify();
-
             Serial.print("Enviado: ");
             Serial.println(data);
         }
