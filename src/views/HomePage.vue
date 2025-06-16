@@ -2,7 +2,7 @@
   <ion-page>
     <ion-header>
       <ion-toolbar color="primary">
-        <ion-title class="ion-text-center">HEXTECH 0.8.f</ion-title>
+        <ion-title class="ion-text-center">HEXTECH 0.9.2</ion-title>
       </ion-toolbar>
     </ion-header>
 
@@ -351,96 +351,102 @@ export default {
       this.chartData.datasets[0].data = filteredData.map(item => item.value);
       this.render = true;
     },
-  async calculateHeartRateWavelet() {
-    const now = Date.now();
-    const windowMs = this.config.tamanhoJanela * 1000;
-    const windowStart = now - windowMs;
+    async calculateHeartRateWavelet() {
+      const now = Date.now();
+      const windowMs = Math.max(this.config.tamanhoJanela * 1000, 8000);  // Sempre pelo menos 8s de análise
+      const windowStart = now - windowMs;
 
-    const dataWindow = this.array.filter(item => item.timestamp >= windowStart);
-    if (dataWindow.length < Math.max(50, this.config.frequencia * this.config.tamanhoJanela * 0.3)) {
-      return { chart: null, bpm: 0 };
-    }
-
-    const rawValues = dataWindow.map(i => i.value);
-    const timestamps = dataWindow.map(i => i.timestamp);
-
-    const samplesPerSecond = this.config.frequencia;
-
-    // 🔮 Suavização proporcional ajustada para cada faixa de frequência
-    let smoothWindowSize = 0;
-    if (samplesPerSecond <= 50) {
-      smoothWindowSize = Math.max(7, Math.floor(samplesPerSecond * 0.3));  // Frequências baixas → suavização mais agressiva
-    } else if (samplesPerSecond <= 100) {
-      smoothWindowSize = Math.floor(samplesPerSecond * 0.15);
-    } else {
-      smoothWindowSize = Math.floor(samplesPerSecond * 0.07);
-    }
-    smoothWindowSize = Math.max(5, smoothWindowSize);
-
-    const smoothed = rawValues.map((_, i, arr) => {
-      const start = Math.max(i - Math.floor(smoothWindowSize / 2), 0);
-      const end = Math.min(i + Math.floor(smoothWindowSize / 2), arr.length);
-      const slice = arr.slice(start, end);
-      const valid = slice.filter(x => typeof x === 'number');
-      return valid.reduce((a, b) => a + b, 0) / valid.length;
-    });
-
-    const avg = smoothed.reduce((a, b) => a + b, 0) / smoothed.length;
-    const std = Math.sqrt(smoothed.reduce((a, b) => a + (b - avg) ** 2, 0) / smoothed.length);
-
-    // Amplitude mínima mais rigorosa para baixas frequências
-    const amplitudeMinima = samplesPerSecond <= 50 ? std * 1.0 : std * 0.5;
-
-    const threshold = avg + std * 1.0;
-    const peaks = [];
-    let lastPeakTime = 0;
-    const minIntervalMs = 600;  // Fisiológico: Mínimo 600ms entre batimentos (~100 BPM máx real)
-
-    for (let i = 1; i < smoothed.length - 1; i++) {
-      const isPeak =
-        smoothed[i] > smoothed[i - 1] &&
-        smoothed[i] > smoothed[i + 1] &&
-        smoothed[i] > threshold &&
-        (smoothed[i] - avg) > amplitudeMinima;
-
-      const timeSinceLastPeak = timestamps[i] - lastPeakTime;
-
-      if (isPeak && timeSinceLastPeak >= minIntervalMs) {
-        peaks.push(timestamps[i]);
-        lastPeakTime = timestamps[i];
+      const dataWindow = this.array.filter(item => item.timestamp >= windowStart);
+      if (dataWindow.length < Math.max(50, this.config.frequencia * (windowMs / 1000) * 0.3)) {
+        return { chart: null, bpm: this.bpmHistory[this.bpmHistory.length - 1] || 0 };
       }
-    }
 
-    let bpm = 0;
-    if (peaks.length >= 2) {
-      const intervals = peaks.slice(1).map((t, i) => t - peaks[i]);
-      const validIntervals = intervals.filter(i => i >= minIntervalMs && i <= 1500);
-      if (validIntervals.length > 0) {
-        const avgIntervalMs = validIntervals.reduce((a, b) => a + b, 0) / validIntervals.length;
-        bpm = 60000 / avgIntervalMs;
+      const rawValues = dataWindow.map(i => i.value);
+      const timestamps = dataWindow.map(i => i.timestamp);
+
+      const samplesPerSecond = this.config.frequencia;
+
+      // 🔮 Suavização proporcional
+      let smoothWindowSize = 7
+      //let smoothWindowSize = Math.floor(samplesPerSecond * 0.15);
+      if (samplesPerSecond >= 80) smoothWindowSize = 8; 
+      smoothWindowSize = Math.max(5, smoothWindowSize);
+
+      const smoothed = rawValues.map((_, i, arr) => {
+        const start = Math.max(i - Math.floor(smoothWindowSize / 2), 0);
+        const end = Math.min(i + Math.floor(smoothWindowSize / 2), arr.length);
+        const slice = arr.slice(start, end);
+        const valid = slice.filter(x => typeof x === 'number');
+        return valid.reduce((a, b) => a + b, 0) / valid.length;
+      });
+
+      const avg = smoothed.reduce((a, b) => a + b, 0) / smoothed.length;
+      const std = Math.sqrt(smoothed.reduce((a, b) => a + (b - avg) ** 2, 0) / smoothed.length);
+
+      let thresholdMultiplier = 1.5;
+      if (samplesPerSecond >= 80) thresholdMultiplier = 1.3;
+
+      const threshold = avg + std * thresholdMultiplier;
+      let amplitudeMinima = std * 0.5;
+      const peaks = [];
+      let lastPeakTime = 0;
+      let minIntervalMs = 480;
+      if (samplesPerSecond >= 80) {
+        minIntervalMs = 700;
       }
-    }
+      for (let i = 1; i < smoothed.length - 1; i++) {
+        const isPeak =
+          smoothed[i] > smoothed[i - 1] &&
+          smoothed[i] > smoothed[i + 1] &&
+          smoothed[i] > threshold &&
+          (smoothed[i] - avg) > amplitudeMinima;
 
-    const min = Math.min(...smoothed);
-    const max = Math.max(...smoothed);
-    const normalized = smoothed.map(v => (v - min) / (max - min || 1));
+        const timeSinceLastPeak = timestamps[i] - lastPeakTime;
 
-    const labels = timestamps.map((t) => ((t - timestamps[0]) / 1000).toFixed(2));
-
-    const chart = {
-      labels,
-      datasets: [
-        {
-          label: `${Math.round(bpm)} BPM`,
-          data: normalized,
-          borderColor: 'rgb(54, 162, 235)',
-          tension: 0.2
+        if (isPeak && timeSinceLastPeak >= minIntervalMs) {
+          peaks.push(timestamps[i]);
+          lastPeakTime = timestamps[i];
         }
-      ]
-    };
+      }
 
-    return { chart, bpm: Math.round(bpm) };
-  },
+      let bpm = 0;
+      if (peaks.length >= 2) {
+        const intervals = peaks.slice(1).map((t, i) => t - peaks[i]);
+        const validIntervals = intervals.filter(i => i >= minIntervalMs && i <= 1500);
+        if (validIntervals.length > 0) {
+          const avgIntervalMs = validIntervals.reduce((a, b) => a + b, 0) / validIntervals.length;
+          bpm = 60000 / avgIntervalMs;
+        }
+      }
+
+      // ✅ Se não houver BPM confiável, segura o último valor válido
+      if (bpm > 0) {
+        this.bpmHistory.push(bpm);
+        if (this.bpmHistory.length > 8) this.bpmHistory.shift();
+      } else if (this.bpmHistory.length > 0) {
+        bpm = this.bpmHistory[this.bpmHistory.length - 1];
+      }
+
+      const min = Math.min(...smoothed);
+      const max = Math.max(...smoothed);
+      const normalized = smoothed.map(v => (v - min) / (max - min || 1));
+
+      const labels = timestamps.map((t) => ((t - timestamps[0]) / 1000).toFixed(2));
+
+      const chart = {
+        labels,
+        datasets: [
+          {
+            label: `${Math.round(bpm)} BPM`,
+            data: normalized,
+            borderColor: 'rgb(54, 162, 235)',
+            tension: 0.2
+          }
+        ]
+      };
+
+      return { chart, bpm: Math.round(bpm) };
+    },
 
 
     async collectHeartRateOverTime() {
