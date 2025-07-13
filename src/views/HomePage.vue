@@ -384,7 +384,7 @@ export default {
       const std = Math.sqrt(smoothed.reduce((a, b) => a + (b - avg) ** 2, 0) / smoothed.length);
 
       let thresholdMultiplier = 1.5;
-      if (samplesPerSecond >= 80) thresholdMultiplier = 1.3;
+      if (samplesPerSecond >= 80) thresholdMultiplier = 1.2;
 
       const threshold = avg + std * thresholdMultiplier;
       let amplitudeMinima = std * 0.5;
@@ -392,7 +392,7 @@ export default {
       let lastPeakTime = 0;
       let minIntervalMs = 480;
       if (samplesPerSecond >= 80) {
-        minIntervalMs = 700;
+        minIntervalMs = 650;
       }
       for (let i = 1; i < smoothed.length - 1; i++) {
         const isPeak =
